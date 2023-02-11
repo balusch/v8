@@ -6,13 +6,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <functional>
+#include <iostream>
+
 #include "include/libplatform/libplatform.h"
 #include "include/v8-context.h"
+#include "include/v8-exception.h"
 #include "include/v8-initialization.h"
 #include "include/v8-isolate.h"
 #include "include/v8-local-handle.h"
 #include "include/v8-primitive.h"
 #include "include/v8-script.h"
+
+static void DisplayIsolateStats(v8::Isolate* isolate);
 
 int main(int argc, char* argv[]) {
   // Initialize V8.
@@ -29,6 +35,26 @@ int main(int argc, char* argv[]) {
   v8::Isolate* isolate = v8::Isolate::New(create_params);
   {
     v8::Isolate::Scope isolate_scope(isolate);
+
+    v8::TryCatch catcher(isolate);
+
+    if (catcher.HasCaught()) {
+      if (catcher.HasTerminated()) {
+        auto msg = catcher.Message();
+        msg->ErrorLevel()
+        catcher.Reset();
+      }
+    }
+
+    isolate->RequestInterrupt();
+    isolate->TerminateExecution();
+    isolate->CancelTerminateExecution();
+    isolate->IsExecutionTerminating();
+    isolate->PerformMicrotaskCheckpoint()
+    v8::Message::GetLineNumber()
+
+    isolate->PerformMicrotaskCheckpoint();
+    DisplayIsolateStats(isolate);
 
     // Create a stack-allocated handle scope.
     v8::HandleScope handle_scope(isolate);
@@ -101,4 +127,71 @@ int main(int argc, char* argv[]) {
   v8::V8::DisposePlatform();
   delete create_params.array_buffer_allocator;
   return 0;
+}
+
+static void DisplayIsolateStats(v8::Isolate* isolate) {
+  v8::HeapStatistics hs;
+  isolate->GetHeapStatistics(&hs);
+
+  std::printf(
+      "total_heap_size:%lu\ntotal_heap_size_executable:%lu\n"
+      "total_physical_size:%lu\ntotal_available_size:%lu\n"
+      "total_global_handlers_size:%lu\nused_global_handles_size:%lu\n"
+      "used_heap_size:%lu\nheap_size_limit:%lu\nmalloced_memory:%lu\n"
+      "external_memory:%lu\npeak_malloced_memory:%lu\n"
+      "number_of_native_contexts:%lu\nnumber_of_detached_contexts:%lu\n",
+      hs.total_heap_size(), hs.total_heap_size_executable(),
+      hs.total_physical_size(), hs.total_available_size(),
+      hs.total_global_handles_size(), hs.used_global_handles_size(),
+      hs.used_heap_size(), hs.heap_size_limit(), hs.malloced_memory(),
+      hs.external_memory(), hs.peak_malloced_memory(),
+      hs.number_of_native_contexts(), hs.number_of_detached_contexts());
+
+  v8::ResourceConstraints rc;
+}
+
+struct HttpResponse;
+static std::string toString(v8::Isolate* isolate, v8::Local<v8::Value> v8str);
+static v8::Local<v8::Object> wrapResponse(v8::Isolate* isolate,
+                                          HttpResponse* rsp);
+static void SendHttpRequest(const std::string url,
+                            std::function<void(HttpResponse*)> on_done,
+                            std::function<void(std::string)> on_error);
+
+static void JsFetchApi(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  auto* isolate = args.GetIsolate();
+  auto context = isolate->GetCurrentContext();
+
+  auto resolver = v8::Promise::Resolver::New(context).ToLocalChecked();
+  args.GetReturnValue().Set(resolver->GetPromise());
+
+  std::string url = toString(isolate, args[0]);
+
+  SendHttpRequest(
+      url,
+      [isolate, resolver](HttpResponse* rsp) {
+        auto context = isolate->GetCurrentContext();
+        auto v8rsp = wrapResponse(isolate, rsp);
+        resolver->Resolve(context, v8rsp).Check();
+      },
+      [isolate, resolver](std::string errmsg) {
+        auto context = isolate->GetCurrentContext();
+        auto ex = v8::Exception::Error(
+            v8::String::NewFromUtf8(isolate, errmsg.c_str(),
+                                    v8::NewStringType::kNormal,
+                                    static_cast<int>(errmsg.size()))
+                .ToLocalChecked());
+        resolver->Reject(context, ex).Check();
+      });
+}
+
+static void JsFetchApiInternal(std::variant<std::string, Request>, std::optional<Object>) {
+
+}
+
+registerApi('fetch', JsFetrchAPiInternal);
+
+static void JsFetchApi(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  ....
+  JsFetchAPiInternal(...);
 }
