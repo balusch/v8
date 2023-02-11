@@ -118,3 +118,5 @@ bazel-v8
 .idea/
 .ccls-cache/
 .vscode/
+notes
+playground
