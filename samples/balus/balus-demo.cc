@@ -35,25 +35,6 @@ int main(int argc, char* argv[]) {
   v8::Isolate* isolate = v8::Isolate::New(create_params);
   {
     v8::Isolate::Scope isolate_scope(isolate);
-
-    v8::TryCatch catcher(isolate);
-
-    if (catcher.HasCaught()) {
-      if (catcher.HasTerminated()) {
-        auto msg = catcher.Message();
-        msg->ErrorLevel()
-        catcher.Reset();
-      }
-    }
-
-    isolate->RequestInterrupt();
-    isolate->TerminateExecution();
-    isolate->CancelTerminateExecution();
-    isolate->IsExecutionTerminating();
-    isolate->PerformMicrotaskCheckpoint()
-    v8::Message::GetLineNumber()
-
-    isolate->PerformMicrotaskCheckpoint();
     DisplayIsolateStats(isolate);
 
     // Create a stack-allocated handle scope.
@@ -146,52 +127,4 @@ static void DisplayIsolateStats(v8::Isolate* isolate) {
       hs.used_heap_size(), hs.heap_size_limit(), hs.malloced_memory(),
       hs.external_memory(), hs.peak_malloced_memory(),
       hs.number_of_native_contexts(), hs.number_of_detached_contexts());
-
-  v8::ResourceConstraints rc;
-}
-
-struct HttpResponse;
-static std::string toString(v8::Isolate* isolate, v8::Local<v8::Value> v8str);
-static v8::Local<v8::Object> wrapResponse(v8::Isolate* isolate,
-                                          HttpResponse* rsp);
-static void SendHttpRequest(const std::string url,
-                            std::function<void(HttpResponse*)> on_done,
-                            std::function<void(std::string)> on_error);
-
-static void JsFetchApi(const v8::FunctionCallbackInfo<v8::Value>& args) {
-  auto* isolate = args.GetIsolate();
-  auto context = isolate->GetCurrentContext();
-
-  auto resolver = v8::Promise::Resolver::New(context).ToLocalChecked();
-  args.GetReturnValue().Set(resolver->GetPromise());
-
-  std::string url = toString(isolate, args[0]);
-
-  SendHttpRequest(
-      url,
-      [isolate, resolver](HttpResponse* rsp) {
-        auto context = isolate->GetCurrentContext();
-        auto v8rsp = wrapResponse(isolate, rsp);
-        resolver->Resolve(context, v8rsp).Check();
-      },
-      [isolate, resolver](std::string errmsg) {
-        auto context = isolate->GetCurrentContext();
-        auto ex = v8::Exception::Error(
-            v8::String::NewFromUtf8(isolate, errmsg.c_str(),
-                                    v8::NewStringType::kNormal,
-                                    static_cast<int>(errmsg.size()))
-                .ToLocalChecked());
-        resolver->Reject(context, ex).Check();
-      });
-}
-
-static void JsFetchApiInternal(std::variant<std::string, Request>, std::optional<Object>) {
-
-}
-
-registerApi('fetch', JsFetrchAPiInternal);
-
-static void JsFetchApi(const v8::FunctionCallbackInfo<v8::Value>& args) {
-  ....
-  JsFetchAPiInternal(...);
 }
