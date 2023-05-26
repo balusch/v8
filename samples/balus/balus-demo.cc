@@ -2,25 +2,41 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <functional>
 #include <iostream>
 
+#include "./util.h"
 #include "include/libplatform/libplatform.h"
 #include "include/v8-context.h"
 #include "include/v8-exception.h"
+#include "include/v8-function.h"
 #include "include/v8-initialization.h"
 #include "include/v8-isolate.h"
 #include "include/v8-local-handle.h"
 #include "include/v8-primitive.h"
 #include "include/v8-script.h"
 
-static void DisplayIsolateStats(v8::Isolate* isolate);
+static v8::Local<v8::String> newV8Str(v8::Isolate* isolate,
+                                      const std::string& str);
+static Result<std::string> readFile(const std::string& path);
+
+static void ExecuteFile(const v8::FunctionCallbackInfo<v8::Value>& args);
+static void TestString(const v8::FunctionCallbackInfo<v8::Value>& args);
 
 int main(int argc, char* argv[]) {
+  if (argc < 2) {
+    std::cerr << "usage:" << argv[0] << " path" << std::endl;
+    return -1;
+  }
+
   // Initialize V8.
   v8::V8::InitializeICUDefaultLocation(argv[0]);
   v8::V8::InitializeExternalStartupData(argv[0]);
@@ -35,70 +51,44 @@ int main(int argc, char* argv[]) {
   v8::Isolate* isolate = v8::Isolate::New(create_params);
   {
     v8::Isolate::Scope isolate_scope(isolate);
-    DisplayIsolateStats(isolate);
 
-    // Create a stack-allocated handle scope.
     v8::HandleScope handle_scope(isolate);
-
-    // Create a new context.
     v8::Local<v8::Context> context = v8::Context::New(isolate);
-
-    // Enter the context for compiling and running the hello world script.
     v8::Context::Scope context_scope(context);
 
     {
-      // Create a string containing the JavaScript source code.
-      v8::Local<v8::String> source =
-          v8::String::NewFromUtf8Literal(isolate, "'Hello' + ', World!'");
+      auto registerFunc = [isolate, context, global = context->Global()](
+                              const std::string& name,
+                              v8::FunctionCallback func) {
+        auto js_name = newV8Str(isolate, name);
+        auto js_func = v8::Function::New(context, func).ToLocalChecked();
+        global->Set(context, js_name, js_func).Check();
+      };
 
-      // Compile the source code.
-      v8::Local<v8::Script> script =
-          v8::Script::Compile(context, source).ToLocalChecked();
+      registerFunc("ExecuteFile", ExecuteFile);
+      registerFunc("TestString", TestString);
 
-      // Run the script to get the result.
+      auto maybeCode = readFile(argv[1]);
+      if (maybeCode.IsError()) {
+        std::cerr << "Failed to read " << argv[0] << ": "
+                  << maybeCode.GetErrorMessage() << std::endl;
+        return -1;
+      }
+
+      v8::Local<v8::String> source = newV8Str(isolate, maybeCode.GetValue());
+      v8::TryCatch tryCatch(isolate);
+      v8::Local<v8::Script> script;
+      if (!v8::Script::Compile(context, source).ToLocal(&script)) {
+        if (tryCatch.HasCaught()) {
+          v8::String::Utf8Value ex(isolate, tryCatch.Exception());
+          std::cerr << "Failed to compile" << argv[0] << ": " << *ex
+                    << std::endl;
+        }
+        return -1;
+      }
       v8::Local<v8::Value> result = script->Run(context).ToLocalChecked();
-
-      // Convert the result to an UTF8 string and print it.
-      v8::String::Utf8Value utf8(isolate, result);
-      printf("%s\n", *utf8);
-    }
-
-    {
-      // Use the JavaScript API to generate a WebAssembly module.
-      //
-      // |bytes| contains the binary format for the following module:
-      //
-      //     (func (export "add") (param i32 i32) (result i32)
-      //       get_local 0
-      //       get_local 1
-      //       i32.add)
-      //
-      const char csource[] = R"(
-        let bytes = new Uint8Array([
-          0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01,
-          0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07,
-          0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00, 0x0a, 0x09, 0x01,
-          0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b
-        ]);
-        let module = new WebAssembly.Module(bytes);
-        let instance = new WebAssembly.Instance(module);
-        instance.exports.add(3, 4);
-      )";
-
-      // Create a string containing the JavaScript source code.
-      v8::Local<v8::String> source =
-          v8::String::NewFromUtf8Literal(isolate, csource);
-
-      // Compile the source code.
-      v8::Local<v8::Script> script =
-          v8::Script::Compile(context, source).ToLocalChecked();
-
-      // Run the script to get the result.
-      v8::Local<v8::Value> result = script->Run(context).ToLocalChecked();
-
-      // Convert the result to a uint32 and print it.
-      uint32_t number = result->Uint32Value(context).ToChecked();
-      printf("3 + 4 = %u\n", number);
+      [[maybe_unused]] v8::String::Utf8Value utf8(isolate, result);
+      // printf("result: %s\n", *utf8);
     }
   }
 
@@ -110,21 +100,124 @@ int main(int argc, char* argv[]) {
   return 0;
 }
 
-static void DisplayIsolateStats(v8::Isolate* isolate) {
-  v8::HeapStatistics hs;
-  isolate->GetHeapStatistics(&hs);
+static v8::Local<v8::String> newV8Str(v8::Isolate* isolate,
+                                      const std::string& str) {
+  v8::EscapableHandleScope scope(isolate);
+  v8::Local<v8::String> ret =
+      v8::String::NewFromUtf8(isolate, str.data(), v8::NewStringType::kNormal,
+                              static_cast<int>(str.size()))
+          .ToLocalChecked();
+  return scope.Escape(ret);
+}
 
+static Result<std::string> readFile(const std::string& path) {
+  int fd = ::open(path.c_str(), O_RDONLY);
+  if (fd < 0) {
+    return MakeError<std::string>(strerror(errno));
+  }
+
+  struct stat statbuf {};
+  ::fstat(fd, &statbuf);
+
+  std::string text;
+  text.resize(statbuf.st_size);
+  ssize_t nread = ::read(fd, text.data(), statbuf.st_size);
+  if (nread != statbuf.st_size) {
+    ::close(fd);
+    return MakeError<std::string>(strerror(errno));
+  }
+
+  ::close(fd);
+  return text;
+}
+
+static void ExecuteFile(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  v8::Isolate* isolate = args.GetIsolate();
+  v8::HandleScope handle_scope(isolate);
+
+  if (args.Length() == 0) {
+    isolate->ThrowException(v8::Exception::TypeError(
+        newV8Str(isolate,
+                 "Failed to execute 'ExecuteFile': expect 1 parameter, but "
+                 "only 0 presents.")));
+    return;
+  }
+}
+
+static void TestString(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  v8::Isolate* isolate = args.GetIsolate();
+  v8::HandleScope handle_scope(isolate);
+  v8::Local<v8::Context> context = isolate->GetCurrentContext();
+
+  if (args.Length() == 0) {
+    isolate->ThrowException(v8::Exception::TypeError(
+        newV8Str(isolate,
+                 "Failed to execute 'TestString': expect 1 parameter, but "
+                 "only 0 presents.")));
+    return;
+  }
+
+  v8::Local<v8::String> tostring;
+  if (!args[0]->ToString(context).ToLocal(&tostring)) {
+    isolate->ThrowException(v8::Exception::TypeError(
+        newV8Str(isolate,
+                 "Failed to execute 'TestString': the provided value cannot be "
+                 "converted to 'string'")));
+    return;
+  }
+
+  v8::String::Utf8Value u(isolate, tostring);
   std::printf(
-      "total_heap_size:%lu\ntotal_heap_size_executable:%lu\n"
-      "total_physical_size:%lu\ntotal_available_size:%lu\n"
-      "total_global_handlers_size:%lu\nused_global_handles_size:%lu\n"
-      "used_heap_size:%lu\nheap_size_limit:%lu\nmalloced_memory:%lu\n"
-      "external_memory:%lu\npeak_malloced_memory:%lu\n"
-      "number_of_native_contexts:%lu\nnumber_of_detached_contexts:%lu\n",
-      hs.total_heap_size(), hs.total_heap_size_executable(),
-      hs.total_physical_size(), hs.total_available_size(),
-      hs.total_global_handles_size(), hs.used_global_handles_size(),
-      hs.used_heap_size(), hs.heap_size_limit(), hs.malloced_memory(),
-      hs.external_memory(), hs.peak_malloced_memory(),
-      hs.number_of_native_contexts(), hs.number_of_detached_contexts());
+      "=============================TEST STRING============================\n"
+      "is one byte:%d, only contains one byte:%d, length:%d, utf8 length:%d, "
+      "Utf8Value: [%d]:[%s]\n",
+      tostring->IsOneByte(), tostring->ContainsOnlyOneByte(),
+      tostring->Length(), tostring->Utf8Length(isolate), u.length(), *u);
+
+  // test UTF-16
+  int u16_len = tostring->Length();
+  std::vector<uint16_t> u16_buf(u16_len, 0xEE);
+  int options = v8::String::WriteOptions::NO_NULL_TERMINATION |
+                v8::String::WriteOptions::REPLACE_INVALID_UTF8;
+  int u16_written = tostring->Write(isolate, u16_buf.data(), 0, -1, options);
+  std::printf(
+      "\t*************TEST UTF16*************\n"
+      "\tu16_len:%d, u16_written:%d\n\t",
+      u16_len, u16_written);
+  for (auto u16 : u16_buf) {
+    std::printf("%x ", u16);
+  }
+  std::printf("\n\t");
+  for (auto u16 : u16_buf) {
+    std::printf("%x %x ", uint8_t(u16 >> 8), uint8_t(u16 & 0xFF));
+  }
+
+  // write UTF-8
+  int u8_len = tostring->Utf8Length(isolate);
+  std::vector<char> u8_buf(u8_len, 0xEE);
+  int nchars = 0;
+  int u8_written =
+      tostring->WriteUtf8(isolate, u8_buf.data(), -1, &nchars, options);
+  std::printf(
+      "\n\t*************TEST UTF8*************\n"
+      "\tu8_len:%d, u8_written:%d\n\t",
+      u8_len, u8_written);
+  for (auto u8 : u8_buf) {
+    std::printf("%x ", uint8_t(u8));
+  }
+
+  // One Byte
+  int onebyte_len = tostring->Utf8Length(isolate);
+  std::vector<uint8_t> onebyte_buf(onebyte_len, 0xEE);
+  int onebyte_written =
+      tostring->WriteOneByte(isolate, onebyte_buf.data(), 0, -1, options);
+  std::printf(
+      "\n\t*************TEST ONEBYTE*************\n"
+      "\tonebyte_len:%d, onebyte_written:%d\n\t",
+      onebyte_len, onebyte_written);
+  for (auto onebyte : onebyte_buf) {
+    std::printf("%x ", uint8_t(onebyte));
+  }
+
+  std::printf("\n");
 }
